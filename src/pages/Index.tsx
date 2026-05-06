@@ -1,9 +1,11 @@
 import { useMemo, useState } from "react";
 import { VivoHeader } from "@/components/VivoHeader";
 import { OfferCard } from "@/components/OfferCard";
+import { CartDrawer } from "@/components/CartDrawer";
 import { useInteractions } from "@/hooks/useInteractions";
+import { useCart, formatPrice, parsePrice } from "@/hooks/useCart";
 import { allOffers, getNBXOffers, Offer } from "@/data/offers";
-import { ArrowLeft, Check, Sparkles, PartyPopper } from "lucide-react";
+import { ArrowLeft, Check, Sparkles, PartyPopper, ShoppingBag, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -13,12 +15,33 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { toast } from "@/hooks/use-toast";
 
 const Index = () => {
-  const { interactions, trackView, reset } = useInteractions();
+  const { interactions, trackView, reset: resetInteractions } = useInteractions();
+  const { items, addItem, removeItem, updateQuantity, clear, totalCount } = useCart();
   const [activeOfferId, setActiveOfferId] = useState<string | null>(null);
+  const [cartOpen, setCartOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [successOpen, setSuccessOpen] = useState(false);
+
+  const cartTotal = items.reduce((sum, i) => {
+    const o = allOffers[i.offerId];
+    return o ? sum + parsePrice(o.price) * i.quantity : sum;
+  }, 0);
+
+  const handleAddToCart = (offer: Offer) => {
+    addItem(offer.id);
+    toast({
+      title: "Adicionado ao carrinho",
+      description: offer.title,
+    });
+  };
+
+  const handleCheckout = () => {
+    setCartOpen(false);
+    setConfirmOpen(true);
+  };
 
   const handleConfirmPurchase = () => {
     setConfirmOpen(false);
@@ -27,8 +50,14 @@ const Index = () => {
 
   const handleSuccessClose = () => {
     setSuccessOpen(false);
+    clear();
     setActiveOfferId(null);
     window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const handleReset = () => {
+    resetInteractions();
+    clear();
   };
 
   const nbxOffers = useMemo(() => getNBXOffers(interactions), [interactions]);
@@ -46,10 +75,96 @@ const Index = () => {
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
+  const headerProps = {
+    showReset: hasHistory || items.length > 0,
+    onReset: handleReset,
+    cartCount: totalCount,
+    onCartClick: () => setCartOpen(true),
+  };
+
+  const cartDrawer = (
+    <CartDrawer
+      open={cartOpen}
+      onOpenChange={setCartOpen}
+      items={items}
+      onUpdateQuantity={updateQuantity}
+      onRemove={removeItem}
+      onCheckout={handleCheckout}
+    />
+  );
+
+  const dialogs = (
+    <>
+      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Confirmar compra</DialogTitle>
+            <DialogDescription>
+              Você está finalizando a compra de <strong>{items.length}</strong> item(ns) no
+              valor total de{" "}
+              <strong className="text-primary">{formatPrice(cartTotal)}</strong>/mês.
+            </DialogDescription>
+          </DialogHeader>
+          <ul className="max-h-48 space-y-2 overflow-y-auto rounded-xl bg-secondary p-4 text-sm">
+            {items.map((i) => {
+              const o = allOffers[i.offerId];
+              if (!o) return null;
+              return (
+                <li key={i.offerId} className="flex justify-between gap-2">
+                  <span className="truncate">
+                    {i.quantity}x {o.title}
+                  </span>
+                  <span className="font-semibold text-primary">
+                    {formatPrice(parsePrice(o.price) * i.quantity)}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmOpen(false)}>
+              Cancelar
+            </Button>
+            <Button
+              className="bg-gradient-vivo text-white shadow-vivo hover:opacity-90"
+              onClick={handleConfirmPurchase}
+            >
+              Confirmar compra
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={successOpen} onOpenChange={(open) => !open && handleSuccessClose()}>
+        <DialogContent>
+          <DialogHeader>
+            <div className="mx-auto mb-2 flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 text-primary">
+              <PartyPopper className="h-7 w-7" />
+            </div>
+            <DialogTitle className="text-center">Compra confirmada!</DialogTitle>
+            <DialogDescription className="text-center">
+              Sua contratação foi realizada com sucesso. Em instantes você receberá os
+              detalhes por e-mail.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              className="w-full bg-gradient-vivo text-white shadow-vivo hover:opacity-90"
+              onClick={handleSuccessClose}
+            >
+              Voltar para ofertas
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+
   if (activeOffer) {
+    const inCart = items.find((i) => i.offerId === activeOffer.id);
     return (
       <div className="min-h-screen bg-gradient-soft">
-        <VivoHeader showReset onReset={reset} />
+        <VivoHeader {...headerProps} />
         <main className="container py-8">
           <Button
             variant="ghost"
@@ -110,79 +225,45 @@ const Index = () => {
                     {activeOffer.price}
                   </div>
                 </div>
+                {inCart && (
+                  <div className="rounded-full bg-primary/10 px-3 py-1 text-xs font-semibold text-primary">
+                    {inCart.quantity} no carrinho
+                  </div>
+                )}
               </div>
 
               <div className="mt-6 flex flex-col gap-3 sm:flex-row">
                 <Button
                   size="lg"
                   className="flex-1 bg-gradient-vivo text-white shadow-vivo hover:opacity-90"
-                  onClick={() => setConfirmOpen(true)}
+                  onClick={() => handleAddToCart(activeOffer)}
                 >
-                  Contratar agora
+                  <Plus className="mr-1 h-4 w-4" />
+                  Adicionar ao carrinho
                 </Button>
-                <Button size="lg" variant="outline" className="flex-1" onClick={goHome}>
-                  Ver outras ofertas
+                <Button
+                  size="lg"
+                  variant="outline"
+                  className="flex-1"
+                  onClick={() => setCartOpen(true)}
+                >
+                  <ShoppingBag className="mr-2 h-4 w-4" />
+                  Ver carrinho ({totalCount})
                 </Button>
               </div>
             </div>
           </div>
         </main>
 
-        <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Confirmar contratação</DialogTitle>
-              <DialogDescription>
-                Você está prestes a contratar <strong>{activeOffer.title}</strong> por{" "}
-                <strong className="text-primary">{activeOffer.price}</strong>. Deseja continuar?
-              </DialogDescription>
-            </DialogHeader>
-            <div className="rounded-xl bg-secondary p-4 text-sm text-foreground/80">
-              {activeOffer.subtitle}
-            </div>
-            <DialogFooter>
-              <Button variant="outline" onClick={() => setConfirmOpen(false)}>
-                Cancelar
-              </Button>
-              <Button
-                className="bg-gradient-vivo text-white shadow-vivo hover:opacity-90"
-                onClick={handleConfirmPurchase}
-              >
-                Confirmar compra
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-
-        <Dialog open={successOpen} onOpenChange={(open) => !open && handleSuccessClose()}>
-          <DialogContent>
-            <DialogHeader>
-              <div className="mx-auto mb-2 flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 text-primary">
-                <PartyPopper className="h-7 w-7" />
-              </div>
-              <DialogTitle className="text-center">Compra confirmada!</DialogTitle>
-              <DialogDescription className="text-center">
-                Sua contratação de <strong>{activeOffer.title}</strong> foi realizada com sucesso.
-                Em instantes você receberá os detalhes.
-              </DialogDescription>
-            </DialogHeader>
-            <DialogFooter>
-              <Button
-                className="w-full bg-gradient-vivo text-white shadow-vivo hover:opacity-90"
-                onClick={handleSuccessClose}
-              >
-                Voltar para ofertas
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
+        {cartDrawer}
+        {dialogs}
       </div>
     );
   }
 
   return (
     <div className="min-h-screen bg-gradient-soft">
-      <VivoHeader showReset={hasHistory} onReset={reset} />
+      <VivoHeader {...headerProps} />
 
       <section className="relative overflow-hidden bg-gradient-vivo text-white">
         <div className="pointer-events-none absolute -right-20 -top-20 h-80 w-80 rounded-full bg-white/10 blur-3xl" />
@@ -257,6 +338,9 @@ const Index = () => {
           Vivo NBX Demo · 09/05 · Caso de Uso 1
         </div>
       </footer>
+
+      {cartDrawer}
+      {dialogs}
     </div>
   );
 };
