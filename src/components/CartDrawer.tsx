@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { CartItem, formatPrice, parsePrice } from "@/hooks/useCart";
-import { allOffers } from "@/data/offers";
+import { allOffers, Offer } from "@/data/offers";
 
 interface CartDrawerProps {
   open: boolean;
@@ -18,6 +18,8 @@ interface CartDrawerProps {
   onUpdateQuantity: (offerId: string, quantity: number) => void;
   onRemove: (offerId: string) => void;
   onCheckout: () => void;
+  /** Catálogo para resolver ítems (estático + ofertas do gateway). Padroniza com `mergedCatalog` da página. */
+  offersById?: Record<string, Offer>;
 }
 
 export const CartDrawer = ({
@@ -27,9 +29,10 @@ export const CartDrawer = ({
   onUpdateQuantity,
   onRemove,
   onCheckout,
+  offersById = allOffers,
 }: CartDrawerProps) => {
   const detailedItems = items
-    .map((i) => ({ item: i, offer: allOffers[i.offerId] }))
+    .map((i) => ({ item: i, offer: offersById[i.offerId] }))
     .filter((x) => x.offer);
 
   const total = detailedItems.reduce(

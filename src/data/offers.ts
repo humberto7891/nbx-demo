@@ -116,16 +116,15 @@ export const defaultCampaignOfferIds = [
 // NBX: Next Best eXperience
 // When a user has interacted with an offer, that offer is promoted as #1
 // and the remaining slots filled with default campaign offers.
-export function getNBXOffers(interactedIds: string[]): Offer[] {
+export function getNBXOffersFromCatalog(interactedIds: string[], catalog: Record<string, Offer>): Offer[] {
   const slots = 4;
   const result: Offer[] = [];
   const used = new Set<string>();
 
-  // Most recent interaction first
   const recent = [...interactedIds].reverse();
   for (const id of recent) {
-    if (allOffers[id] && !used.has(id)) {
-      result.push(allOffers[id]);
+    if (catalog[id] && !used.has(id)) {
+      result.push(catalog[id]);
       used.add(id);
     }
     if (result.length >= slots) break;
@@ -133,11 +132,48 @@ export function getNBXOffers(interactedIds: string[]): Offer[] {
 
   for (const id of defaultCampaignOfferIds) {
     if (result.length >= slots) break;
-    if (!used.has(id) && allOffers[id]) {
-      result.push(allOffers[id]);
+    if (!used.has(id) && catalog[id]) {
+      result.push(catalog[id]);
       used.add(id);
     }
   }
 
   return result;
+}
+
+/** Catálogo estático apenas. Para mesclagem com gateway use `getNBXOffersFromCatalog`. */
+export function getNBXOffers(interactedIds: string[]): Offer[] {
+  return getNBXOffersFromCatalog(interactedIds, allOffers);
+}
+
+/**
+ * Ordem do gateway primeiro; completar até 4 slots com catálogo local sem duplicar.
+ */
+export function buildOfferGridFour(
+  decisionOrderedIds: string[],
+  catalog: Record<string, Offer>,
+  interactedIds: string[],
+): Offer[] {
+  const slots = 4;
+  const primary: Offer[] = [];
+  const used = new Set<string>();
+
+  for (const id of decisionOrderedIds) {
+    const o = catalog[id];
+    if (o && !used.has(id)) {
+      primary.push(o);
+      used.add(id);
+    }
+    if (primary.length >= slots) return primary.slice(0, slots);
+  }
+
+  for (const o of getNBXOffersFromCatalog(interactedIds, catalog)) {
+    if (primary.length >= slots) break;
+    if (!used.has(o.id)) {
+      primary.push(o);
+      used.add(o.id);
+    }
+  }
+
+  return primary.slice(0, slots);
 }

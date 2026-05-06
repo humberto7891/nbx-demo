@@ -1,0 +1,622 @@
+openapi: 3.0.3
+info:
+  title: NBX Gateway — Integração Front
+  version: "1.0.0"
+  description: |
+    Contrato REST exposto pelo NBX Gateway para o front da jornada de compra.
+
+    **Base URL:** configurável por ambiente (ex.: `https://<seu-dominio>/` ou Kong `:8000` → gateway `:8080`).
+
+    **Formato:** `Content-Type: application/json` onde aplicável.
+
+    **Autenticação:** `Authorization: Bearer <access_token>` é obrigatória para interações, decisão/ofertas e ping.
+    O gateway valida o token via nbx-auth; token inválido → **401**.
+    Auth indisponível → **503** com corpo `{"message":"Authentication service unavailable"}`.
+
+    **Paths sem Bearer** (pelo application.yml atual): `GET /actuator/health`, `GET /actuator/info`,
+    `POST /api/v1/auth/login`, `POST /api/v1/auth/validate`.
+
+    **Observabilidade:** header opcional `X-Correlation-Id`; se omitido o gateway gera. Sempre devolvido na resposta.
+
+    **Tipos de interação (MVP)** — configurados sob `interaction_types_mvp` em `features.yaml`. Eventos com `type` fora da lista são rejeitados ou marcados inválidos:
+    | `type` | Descrição |
+    |--------|-----------|
+    | `offer_viewed` | Usuário visualizou uma oferta |
+    | `cart_abandoned` | Usuário abandonou carrinho |
+    | `checkout_started` | Usuário iniciou checkout |
+    | `purchase_completed` | Usuário concluiu compra |
+
+servers:
+  - url: "{baseUrl}"
+    variables:
+      baseUrl:
+        default: https://api.example.com
+        description: Base do gateway NBX por ambiente
+
+tags:
+  - name: interactions
+    description: Registro de interações (PartyInteraction via gRPC/JsonFormat)
+  - name: decision-access
+    description: Busca de decisão, ações recomendadas e ofertas
+  - name: gateway
+    description: Health lógico e validação de token
+
+paths:
+  /api/v1/interactions:
+    post:
+      tags: [interactions]
+      summary: Registrar interação
+      description: |
+        Cria interação no NBX. Body em camelCase (Java/Jackson).
+
+        **`interactionDate`:** ISO-8601; no gateway vira `TimestampRange` com início e fim iguais.
+
+        **`type` (MVP):** use apenas os valores enumerados neste schema; outros podem falhar na validação.
+      operationId: createInteraction
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/XCorrelationIdOptional"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePartyInteractionRequest"
+            examples:
+              mvp_offer_viewed:
+                summary: MVP — usuário visualizou oferta
+                value:
+                  direction: OUTBOUND
+                  status: OPEN
+                  type: offer_viewed
+                  description: Usuário abriu detalhe da oferta
+                  interactionDate: "2026-05-06T14:30:00.000Z"
+                  customerId: cust-123
+                  channel: WEB
+                  extraFields:
+                    offerId: offer-789
+                    campaignId: camp-001
+              mvp_checkout_started:
+                summary: MVP — usuário iniciou checkout
+                value:
+                  direction: OUTBOUND
+                  status: OPEN
+                  type: checkout_started
+                  description: Usuário abriu resumo do pedido
+                  interactionDate: "2026-05-06T14:30:00.000Z"
+                  customerId: cust-123
+                  channel: WEB
+                  extraFields:
+                    step: checkout_summary
+                    cartId: cart-456
+      responses:
+        "201":
+          description: Interação criada (CreatePartyInteractionResponse serializado)
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+            X-RateLimit-Remaining:
+              description: Limite em memória no gateway para esta rota (quando aplicável)
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatePartyInteractionResponse"
+              example:
+                partyInteraction:
+                  id: int-550e8400-e29b-41d4-a716-446655440000
+                  creationDate: "2026-05-06T14:30:01.000Z"
+                  description: Usuário abriu detalhe da oferta
+                  direction: OUTBOUND
+                  interactionDate:
+                    start: "2026-05-06T14:30:00.000Z"
+                    end: "2026-05-06T14:30:00.000Z"
+                  lastUpdate: "2026-05-06T14:30:01.000Z"
+                  status: OPEN
+                  statusChangeDate: "2026-05-06T14:30:01.000Z"
+                  type: offer_viewed
+                  interactionItems: []
+                  relatedParties: []
+                  relatedChannels: []
+                  attachments: []
+                  notes: []
+                  extraFields:
+                    offerId: offer-789
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/UnauthorizedFilter"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailableCircuit"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /api/v1/decision-access/decisions/{decisionId}:
+    get:
+      tags: [decision-access]
+      summary: Buscar decisão e ofertas
+      description: |
+        Retorna `GetDecisionResponse` (proto → JsonFormat, camelCase).
+
+        O gateway monta `request_id` do gRPC assim: `X-Request-Id` se existir; senão `X-Correlation-Id`; senão UUID novo.
+      operationId: getDecision
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: decisionId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: X-Request-Id
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Tracing no backend (preferido para request_id gRPC)
+        - $ref: "#/components/parameters/XCorrelationIdOptional"
+      responses:
+        "200":
+          description: Decisão encontrada
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetDecisionResponse"
+              example:
+                decisionId: dec-abc
+                requestId: req-xyz
+                customerId: cust-123
+                interactionId: int-550e8400-e29b-41d4-a716-446655440000
+                recommendedActions:
+                  - rank: 1
+                    campaignId: camp-001
+                    offers:
+                      - id: offer-1
+                        name: Combo fibra + móvel
+                        type: BUNDLE
+                        price:
+                          amount: "99.90"
+                          currency: BRL
+                    reasonWhy:
+                      headline: Melhor custo-benefício para seu perfil
+                    channel: WEB
+                metadata:
+                  decisionAgeMs: 120
+                  evaluatedCampaigns: 42
+                  eligibleCampaigns: 3
+                decidedAt: "2026-05-06T14:31:00.000Z"
+                degraded: false
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/UnauthorizedFilter"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Decisão não encontrada (ex. prefixo típico Decision not found)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpringErrorBody"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /api/v1/gateway/ping:
+    get:
+      tags: [gateway]
+      summary: Ping do gateway (health lógico + token)
+      description: Requer Bearer. Útil para validar token e ambiente antes do fluxo de compra.
+      operationId: gatewayPing
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/XCorrelationIdOptional"
+      responses:
+        "200":
+          description: Gateway ok; eco de claims quando autenticado
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatewayPingResponse"
+              examples:
+                authenticated:
+                  value:
+                    status: ok
+                    subject: user-uuid
+                    clientId: vivo-web
+                    tenantId: tenant-1
+                    scopes: ["nbx.read", "nbx.write"]
+                minimal:
+                  value:
+                    status: ok
+        "401":
+          $ref: "#/components/responses/UnauthorizedFilter"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token validado pelo nbx-auth.
+
+  parameters:
+    XCorrelationIdOptional:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      schema:
+        type: string
+      description: Correlação ponta a ponta; eco na resposta.
+
+  headers:
+    XCorrelationId:
+      description: ID de correlação (eco ou gerado pelo gateway)
+      schema:
+        type: string
+
+  schemas:
+    InteractionTypeMvp:
+      type: string
+      description: >
+        Valores permitidos para `type` no MVP (`interaction_types_mvp` em features.yaml).
+        Tipos não listados podem ser rejeitados ou marcados inválidos.
+      enum:
+        - offer_viewed
+        - cart_abandoned
+        - checkout_started
+        - purchase_completed
+
+    CreatePartyInteractionRequest:
+      type: object
+      required:
+        - direction
+        - status
+        - type
+        - interactionDate
+        - customerId
+        - channel
+      properties:
+        direction:
+          type: string
+          description: Fluxo conforme contrato do domínio (ex. INBOUND, OUTBOUND)
+          example: OUTBOUND
+        status:
+          type: string
+          description: Estado da interação (ex. OPEN)
+          example: OPEN
+        type:
+          $ref: "#/components/schemas/InteractionTypeMvp"
+        description:
+          type: string
+          description: Texto livre opcional
+        interactionDate:
+          type: string
+          format: date-time
+          description: Instant ISO-8601
+          example: "2026-05-06T14:30:00.000Z"
+        customerId:
+          type: string
+        channel:
+          type: string
+          example: WEB
+        extraFields:
+          type: object
+          additionalProperties: true
+          description: Mapa JSON genérico; aninhamento vira Struct no gRPC
+
+    TimestampRange:
+      type: object
+      description: Intervalo derivado de `interactionDate` no gateway
+      properties:
+        start:
+          type: string
+          format: date-time
+        end:
+          type: string
+          format: date-time
+
+    PartyInteraction:
+      type: object
+      description: Núcleo da resposta; campos opcionais podem ser omitidos pelo JsonFormat
+      properties:
+        id:
+          type: string
+        creationDate:
+          type: string
+          format: date-time
+        description:
+          type: string
+        direction:
+          type: string
+        interactionDate:
+          $ref: "#/components/schemas/TimestampRange"
+        lastUpdate:
+          type: string
+          format: date-time
+        status:
+          type: string
+        statusChangeDate:
+          type: string
+          format: date-time
+        type:
+          type: string
+        interactionItems:
+          type: array
+          items: {}
+        relatedParties:
+          type: array
+          items: {}
+        relatedChannels:
+          type: array
+          items: {}
+        attachments:
+          type: array
+          items: {}
+        notes:
+          type: array
+          items: {}
+        extraFields:
+          type: object
+          additionalProperties: true
+
+    CreatePartyInteractionResponse:
+      type: object
+      properties:
+        partyInteraction:
+          $ref: "#/components/schemas/PartyInteraction"
+
+    OfferPrice:
+      type: object
+      properties:
+        amount:
+          type: string
+        currency:
+          type: string
+
+    OfferCard:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+        price:
+          $ref: "#/components/schemas/OfferPrice"
+
+    RecommendedAction:
+      type: object
+      properties:
+        rank:
+          type: integer
+          description: Prioridade (1 = maior)
+        campaignId:
+          type: string
+        offers:
+          type: array
+          items:
+            $ref: "#/components/schemas/OfferCard"
+        reasonWhy:
+          type: object
+          additionalProperties: true
+          description: Texto/estrutura explicativa (opcional)
+        channel:
+          type: string
+
+    DecisionMetadata:
+      type: object
+      additionalProperties: true
+      properties:
+        decisionAgeMs:
+          type: integer
+        evaluatedCampaigns:
+          type: integer
+        eligibleCampaigns:
+          type: integer
+
+    GetDecisionResponse:
+      type: object
+      properties:
+        decisionId:
+          type: string
+        requestId:
+          type: string
+        customerId:
+          type: string
+        interactionId:
+          type: string
+          description: Liga com interações POST
+        recommendedActions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecommendedAction"
+        metadata:
+          $ref: "#/components/schemas/DecisionMetadata"
+        decidedAt:
+          type: string
+          description: Timestamp proto em JSON (RFC 3339 típico)
+        degraded:
+          type: boolean
+        degradedReason:
+          type: string
+
+    GatewayPingResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+        subject:
+          type: string
+        clientId:
+          type: string
+        tenantId:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+
+    SimpleMessage:
+      type: object
+      properties:
+        message:
+          type: string
+
+    SpringErrorBody:
+      type: object
+      description: Erro típico Spring Boot (podem variar campos)
+      properties:
+        status:
+          type: integer
+        error:
+          type: string
+        message:
+          type: string
+        path:
+          type: string
+        timestamp:
+          type: string
+
+  responses:
+    UnauthorizedFilter:
+      description: Token ausente ou inválido (filtro de auth)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SimpleMessage"
+          examples:
+            invalid_token:
+              value:
+                message: Unauthorized
+            auth_header_missing:
+              value:
+                message: Missing Authorization header
+
+    TooManyRequests:
+      description: |
+        RESOURCE_EXHAUSTED (quota backend) ou rate limit local do gateway.
+        O gateway pode devolver apenas `{"message":"Too many requests"}`.
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/SimpleMessage"
+              - $ref: "#/components/schemas/SpringErrorBody"
+          examples:
+            gateway_rate_limit:
+              summary: Mensagem simples do gateway
+              value:
+                message: Too many requests
+            spring_style:
+              summary: Estilo ProblemDetails/Spring (ilustrativo)
+              value:
+                status: 429
+                error: Too Many Requests
+                message: Quota exceeded
+                path: /api/v1/interactions
+                timestamp: "2026-05-06T14:35:00.000Z"
+
+    BadRequest:
+      description: Argumento inválido no serviço (400)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SpringErrorBody"
+
+    Forbidden:
+      description: PERMISSION_DENIED (403)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SpringErrorBody"
+
+    NotFound:
+      description: NOT_FOUND (404)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SpringErrorBody"
+
+    Conflict:
+      description: ALREADY_EXISTS / ABORTED (409)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SpringErrorBody"
+
+    PreconditionFailed:
+      description: FAILED_PRECONDITION (412)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SpringErrorBody"
+
+    BadGateway:
+      description: Indisponível ou falha genérica de chamada (502)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SpringErrorBody"
+
+    ServiceUnavailableCircuit:
+      description: |
+        Auth indisponível ou circuit breaker do gateway (interação).
+        Auth indisponível inclui `{"message":"Authentication service unavailable"}`.
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/SimpleMessage"
+              - $ref: "#/components/schemas/SpringErrorBody"
+          examples:
+            auth_down:
+              value:
+                message: Authentication service unavailable
+
+    GatewayTimeout:
+      description: DEADLINE_EXCEEDED (504)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SpringErrorBody"
+
+    InternalServerError:
+      description: Erro interno (500)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SpringErrorBody"

@@ -1,1 +1,14 @@
 /// <reference types="vite/client" />
+
+interface ImportMetaEnv {
+  readonly VITE_NBX_GATEWAY_URL?: string;
+  readonly VITE_NBX_ACCESS_TOKEN?: string;
+  readonly VITE_NBX_LOGIN_USERNAME?: string;
+  readonly VITE_NBX_LOGIN_PASSWORD?: string;
+  /** GET /api/v1/decision-access/decisions/{id} para preencher cards com ofertas do motor. */
+  readonly VITE_NBX_DECISION_ID?: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}
