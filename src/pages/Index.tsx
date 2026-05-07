@@ -12,11 +12,16 @@ import {
   MVP_CHECKOUT_STARTED,
   MVP_OFFER_VIEWED,
   MVP_PURCHASE_COMPLETED,
+  NBX_INTERACTION_CUSTOMER_ID,
   type MvpInteractionType,
 } from "@/lib/nbx/interactions";
 import { ensureNbxAccessToken, clearStoredAuthToken } from "@/lib/nbx/auth";
 import { getOrCreateCorrelationId, resetCorrelationId } from "@/lib/nbx/correlation";
-import { fetchDecisionPayload, parseDecisionOffers } from "@/lib/nbx/decisionAccess";
+import {
+  fetchDecisionPayload,
+  fetchDecisionPayloadByCustomerId,
+  parseDecisionOffers,
+} from "@/lib/nbx/decisionAccess";
 import { ArrowLeft, Check, Sparkles, PartyPopper, ShoppingBag, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -95,38 +100,52 @@ const Index = () => {
     void ensureNbxAccessToken(cfg.baseUrl);
   }, []);
 
-  useEffect(() => {
+  const loadDecisionOffers = useCallback(async () => {
+    const customerId =
+      import.meta.env.VITE_NBX_DECISION_CUSTOMER_ID?.trim() || NBX_INTERACTION_CUSTOMER_ID;
     const decisionId = import.meta.env.VITE_NBX_DECISION_ID?.trim();
     const cfg = getNbxStaticConfig();
-    if (!decisionId || !cfg) return;
+    if (!cfg) return;
 
+    const raw =
+      (await fetchDecisionPayloadByCustomerId(customerId)) ||
+      (decisionId ? await fetchDecisionPayload(decisionId) : null);
+
+    if (!raw) {
+      setGatewayById({});
+      setDecisionOrderedIds([]);
+      setDecisionDegraded(false);
+      toast({
+        title: "NBX decisão indisponível",
+        description:
+          "Não foi possível carregar ofertas do gateway. Confira login, customerId/decisionId e rede (CORS).",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const parsed = parseDecisionOffers(raw);
+    setGatewayById(parsed.offeredById);
+    setDecisionOrderedIds(parsed.orderedOfferIds);
+    setDecisionDegraded(parsed.degraded);
+    if (import.meta.env.DEV && parsed.degradedReason) {
+      console.warn("[NBX] decisão degradada:", parsed.degradedReason);
+    }
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
-
     void (async () => {
-      const raw = await fetchDecisionPayload(decisionId);
+      await loadDecisionOffers();
       if (cancelled) return;
-      if (!raw) {
-        toast({
-          title: "NBX decisão indisponível",
-          description:
-            "Não foi possível carregar ofertas do gateway. Confira login, decisão ID e rede (CORS).",
-          variant: "destructive",
-        });
-        return;
-      }
-
-      const parsed = parseDecisionOffers(raw);
-      setGatewayById(parsed.offeredById);
-      setDecisionOrderedIds(parsed.orderedOfferIds);
-      setDecisionDegraded(parsed.degraded);
-      if (import.meta.env.DEV && parsed.degradedReason) {
-        console.warn("[NBX] decisão degradada:", parsed.degradedReason);
-      }
     })();
-
     return () => {
       cancelled = true;
     };
+  }, [loadDecisionOffers]);
+
+  const refreshOffers = useCallback(() => {
+    void loadDecisionOffers();
   }, []);
 
   const handleAddToCart = (offer: Offer) => {
@@ -145,6 +164,7 @@ const Index = () => {
       type: MVP_CHECKOUT_STARTED,
       description: "Usuário iniciou checkout no e-commerce",
     });
+    refreshOffers();
   };
 
   const handleConfirmPurchase = () => {
@@ -155,6 +175,7 @@ const Index = () => {
       type: MVP_PURCHASE_COMPLETED,
       description: "Usuário concluiu a compra no e-commerce",
     });
+    refreshOffers();
     queueMicrotask(() => {
       confirmPurchaseInProgressRef.current = false;
     });
@@ -174,6 +195,7 @@ const Index = () => {
               : "Usuário abriu e fechou o carrinho (drawer)",
         });
       }
+      refreshOffers();
     }
     setCartOpen(open);
   };
@@ -182,6 +204,7 @@ const Index = () => {
     setSuccessOpen(false);
     clear();
     setActiveOfferId(null);
+    refreshOffers();
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -206,6 +229,7 @@ const Index = () => {
 
   const goHome = () => {
     setActiveOfferId(null);
+    refreshOffers();
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -238,6 +262,7 @@ const Index = () => {
               type: MVP_CART_ABANDONED,
               description: "Usuário abandonou o carrinho (saiu da confirmação sem comprar)",
             });
+            refreshOffers();
           }
           setConfirmOpen(open);
         }}

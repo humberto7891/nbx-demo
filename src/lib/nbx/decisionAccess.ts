@@ -76,24 +76,18 @@ export type ParsedDecisionOffers = {
   decisionId?: string;
 };
 
-/**
- * GET /api/v1/decision-access/decisions/{decisionId}
- */
-export async function fetchDecisionPayload(decisionId: string): Promise<unknown | null> {
+async function fetchDecisionByPath(path: string): Promise<unknown | null> {
   const env = await ensureNbxGatewayEnv();
   if (!env) return null;
 
   try {
-    const res = await fetch(
-      `${env.baseUrl}/api/v1/decision-access/decisions/${encodeURIComponent(decisionId)}`,
-      {
-        headers: {
-          Authorization: `Bearer ${env.accessToken}`,
-          Accept: "application/json",
-          "X-Correlation-Id": getOrCreateCorrelationId(),
-        },
+    const res = await fetch(`${env.baseUrl}${path}`, {
+      headers: {
+        Authorization: `Bearer ${env.accessToken}`,
+        Accept: "application/json",
+        "X-Correlation-Id": getOrCreateCorrelationId(),
       },
-    );
+    });
 
     if (!res.ok) {
       const txt = await res.text().catch(() => "");
@@ -107,6 +101,22 @@ export async function fetchDecisionPayload(decisionId: string): Promise<unknown 
     if (import.meta.env.DEV) console.warn("[NBX] decisão fetch falhou", e);
     return null;
   }
+}
+
+/** GET /api/v1/decision-access/customers/{customerId}/decision */
+export async function fetchDecisionPayloadByCustomerId(
+  customerId: string,
+): Promise<unknown | null> {
+  return fetchDecisionByPath(
+    `/api/v1/decision-access/customers/${encodeURIComponent(customerId)}/decision`,
+  );
+}
+
+/** @deprecated compatibilidade com endpoint antigo por decisionId. */
+export async function fetchDecisionPayload(decisionId: string): Promise<unknown | null> {
+  return fetchDecisionByPath(
+    `/api/v1/decision-access/decisions/${encodeURIComponent(decisionId)}`,
+  );
 }
 
 export function parseDecisionOffers(payload: unknown): ParsedDecisionOffers {
