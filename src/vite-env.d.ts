@@ -9,6 +9,8 @@ interface ImportMetaEnv {
   readonly VITE_NBX_DECISION_CUSTOMER_ID?: string;
   /** GET /api/v1/decision-access/decisions/{id} para preencher cards com ofertas do motor. */
   readonly VITE_NBX_DECISION_ID?: string;
+  /** Base do nbx-simulator (sem barra final). Default no código: http://localhost:8085 */
+  readonly VITE_SIMULATOR_URL?: string;
 }
 
 interface ImportMeta {

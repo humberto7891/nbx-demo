@@ -5,6 +5,8 @@ export type Offer = {
   title: string;
   subtitle: string;
   category: "Smartphone" | "Plano" | "Internet" | "TV" | "Acessório" | "Serviço";
+  /** Slug de catálogo vindo da decisão NBX (`product_id` / productId); ex.: `off-iphone-17-pro-max`. */
+  catalogProductId?: string;
   price: string;
   badge?: string;
   image?: string;

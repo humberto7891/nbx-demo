@@ -4,7 +4,7 @@ import { OfferCard } from "@/components/OfferCard";
 import { CartDrawer } from "@/components/CartDrawer";
 import { useInteractions } from "@/hooks/useInteractions";
 import { useCart, formatPrice, parsePrice } from "@/hooks/useCart";
-import { allOffers, buildOfferGridFour, Offer } from "@/data/offers";
+import { buildOfferGridFour, Offer } from "@/data/offers";
 import {
   getNbxStaticConfig,
   submitPartyInteraction,
@@ -17,12 +17,13 @@ import {
 } from "@/lib/nbx/interactions";
 import { ensureNbxAccessToken, clearStoredAuthToken } from "@/lib/nbx/auth";
 import { getOrCreateCorrelationId, resetCorrelationId } from "@/lib/nbx/correlation";
+import { fetchAndBuildDecisionOffers } from "@/lib/nbx/decisionAccess";
 import {
-  fetchDecisionPayload,
-  fetchDecisionPayloadByCustomerId,
-  parseDecisionOffers,
-} from "@/lib/nbx/decisionAccess";
-import { ArrowLeft, Check, Sparkles, PartyPopper, ShoppingBag, Plus } from "lucide-react";
+  simulateIphonePurchase,
+  revertSimulatedIphonePurchase,
+  SIMULATOR_IPHONE_PRODUCT_ID,
+} from "@/lib/nbx/simulatorPurchase";
+import { ArrowLeft, Check, Loader2, Sparkles, PartyPopper, ShoppingBag, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -33,6 +34,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { toast } from "@/hooks/use-toast";
+import { Skeleton } from "@/components/ui/skeleton";
 
 const Index = () => {
   const { interactions, trackView, reset: resetInteractions } = useInteractions();
@@ -47,15 +49,14 @@ const Index = () => {
   const cartItemsRef = useRef(items);
   cartItemsRef.current = items;
 
-  /** Ofertas retornadas em `recommendedActions`; ids mescladas com catálogo local por `offerId`. */
+  /** Ofertas vindas apenas da API NBX (`decision-access` + `product-offerings`). */
   const [gatewayById, setGatewayById] = useState<Record<string, Offer>>({});
   const [decisionOrderedIds, setDecisionOrderedIds] = useState<string[]>([]);
   const [decisionDegraded, setDecisionDegraded] = useState(false);
+  const [offersLoading, setOffersLoading] = useState(true);
+  const [purchaseConfirmBusy, setPurchaseConfirmBusy] = useState(false);
 
-  const mergedCatalog = useMemo(
-    (): Record<string, Offer> => ({ ...allOffers, ...gatewayById }),
-    [gatewayById],
-  );
+  const mergedCatalog = gatewayById;
 
   const cartTotal = items.reduce((sum, i) => {
     const o = mergedCatalog[i.offerId];
@@ -77,11 +78,18 @@ const Index = () => {
             .filter((o): o is Offer => !!o && !primaryIds.has(o.id))
         : [];
     const need = Math.max(0, 4 - tail.length);
-    const fallback =
-      need > 0
-        ? Object.values(allOffers).filter((o) => !primaryIds.has(o.id) && !tail.find((t) => t.id === o.id))
-        : [];
-    return [...tail, ...fallback].slice(0, 4);
+    if (need === 0) return tail.slice(0, 4);
+
+    const tailIds = new Set(tail.map((t) => t.id));
+    const fallbackPool = Object.values(mergedCatalog).filter(
+      (o) => !primaryIds.has(o.id) && !tailIds.has(o.id),
+    );
+    fallbackPool.sort((a, b) => {
+      const ia = decisionOrderedIds.indexOf(a.id);
+      const ib = decisionOrderedIds.indexOf(b.id);
+      return (ia === -1 ? 99999 : ia) - (ib === -1 ? 99999 : ib);
+    });
+    return [...tail, ...fallbackPool.slice(0, need)].slice(0, 4);
   }, [primaryOffers, mergedCatalog, decisionOrderedIds]);
 
   const usesGatewayOffers = decisionOrderedIds.length > 0;
@@ -101,35 +109,46 @@ const Index = () => {
   }, []);
 
   const loadDecisionOffers = useCallback(async () => {
-    const customerId =
-      import.meta.env.VITE_NBX_DECISION_CUSTOMER_ID?.trim() || NBX_INTERACTION_CUSTOMER_ID;
-    const decisionId = import.meta.env.VITE_NBX_DECISION_ID?.trim();
-    const cfg = getNbxStaticConfig();
-    if (!cfg) return;
+    setOffersLoading(true);
+    try {
+      if (!getNbxStaticConfig()) {
+        setGatewayById({});
+        setDecisionOrderedIds([]);
+        setDecisionDegraded(false);
+        toast({
+          title: "NBX não configurado",
+          description: "Defina VITE_NBX_GATEWAY_URL para carregar ofertas da API.",
+          variant: "destructive",
+        });
+        return;
+      }
 
-    const raw =
-      (await fetchDecisionPayloadByCustomerId(customerId)) ||
-      (decisionId ? await fetchDecisionPayload(decisionId) : null);
+      const customerId =
+        import.meta.env.VITE_NBX_DECISION_CUSTOMER_ID?.trim() || NBX_INTERACTION_CUSTOMER_ID;
 
-    if (!raw) {
-      setGatewayById({});
-      setDecisionOrderedIds([]);
-      setDecisionDegraded(false);
-      toast({
-        title: "NBX decisão indisponível",
-        description:
-          "Não foi possível carregar ofertas do gateway. Confira login, customerId/decisionId e rede (CORS).",
-        variant: "destructive",
-      });
-      return;
-    }
+      const parsed = await fetchAndBuildDecisionOffers(customerId);
 
-    const parsed = parseDecisionOffers(raw);
-    setGatewayById(parsed.offeredById);
-    setDecisionOrderedIds(parsed.orderedOfferIds);
-    setDecisionDegraded(parsed.degraded);
-    if (import.meta.env.DEV && parsed.degradedReason) {
-      console.warn("[NBX] decisão degradada:", parsed.degradedReason);
+      if (!parsed) {
+        setGatewayById({});
+        setDecisionOrderedIds([]);
+        setDecisionDegraded(false);
+        toast({
+          title: "NBX decisão indisponível",
+          description:
+            "Não foi possível carregar ofertas do gateway. Confira login, customerId e rede (CORS).",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      setGatewayById(parsed.offeredById);
+      setDecisionOrderedIds(parsed.orderedOfferIds);
+      setDecisionDegraded(parsed.degraded);
+      if (import.meta.env.DEV && parsed.degradedReason) {
+        console.warn("[NBX] decisão degradada:", parsed.degradedReason);
+      }
+    } finally {
+      setOffersLoading(false);
     }
   }, []);
 
@@ -167,8 +186,35 @@ const Index = () => {
     refreshOffers();
   };
 
-  const handleConfirmPurchase = () => {
+  const handleConfirmPurchase = async () => {
     confirmPurchaseInProgressRef.current = true;
+
+    const catalogSnap = mergedCatalog;
+    const needsSimulatorPurchase = cartItemsRef.current.some(
+      (line) => catalogSnap[line.offerId]?.catalogProductId === SIMULATOR_IPHONE_PRODUCT_ID,
+    );
+
+    if (needsSimulatorPurchase) {
+      setPurchaseConfirmBusy(true);
+      try {
+        const cid =
+          import.meta.env.VITE_NBX_DECISION_CUSTOMER_ID?.trim() ||
+          NBX_INTERACTION_CUSTOMER_ID;
+        const sim = await simulateIphonePurchase({ customerId: cid });
+        if (!sim.ok) {
+          toast({
+            title: "Simulador NBX indisponível",
+            description: sim.message,
+            variant: "destructive",
+          });
+          confirmPurchaseInProgressRef.current = false;
+          return;
+        }
+      } finally {
+        setPurchaseConfirmBusy(false);
+      }
+    }
+
     setConfirmOpen(false);
     setSuccessOpen(true);
     pushNbxInteraction({
@@ -209,6 +255,13 @@ const Index = () => {
   };
 
   const handleReset = () => {
+    const cid =
+      import.meta.env.VITE_NBX_DECISION_CUSTOMER_ID?.trim() || NBX_INTERACTION_CUSTOMER_ID;
+    void revertSimulatedIphonePurchase({ customerId: cid }).then((r) => {
+      if (import.meta.env.DEV && !r.ok)
+        console.warn("[NBX simulator] não foi possível reverter compra iPhone:", r.message);
+    });
+
     resetCorrelationId();
     clearStoredAuthToken();
     resetInteractions();
@@ -257,6 +310,7 @@ const Index = () => {
       <Dialog
         open={confirmOpen}
         onOpenChange={(open) => {
+          if (!open && purchaseConfirmBusy) return;
           if (!open && !confirmPurchaseInProgressRef.current) {
             pushNbxInteraction({
               type: MVP_CART_ABANDONED,
@@ -293,14 +347,26 @@ const Index = () => {
             })}
           </ul>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmOpen(false)}>
+            <Button
+              variant="outline"
+              disabled={purchaseConfirmBusy}
+              onClick={() => setConfirmOpen(false)}
+            >
               Cancelar
             </Button>
             <Button
               className="bg-gradient-vivo text-white shadow-vivo hover:opacity-90"
-              onClick={handleConfirmPurchase}
+              disabled={purchaseConfirmBusy}
+              onClick={() => void handleConfirmPurchase()}
             >
-              Confirmar compra
+              {purchaseConfirmBusy ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Registrando no simulador…
+                </>
+              ) : (
+                "Confirmar compra"
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -442,27 +508,33 @@ const Index = () => {
         <div className="container relative pb-24 pt-12 sm:pb-28 sm:pt-16 lg:pb-32 lg:pt-20">
           <div className="inline-flex items-center gap-2 rounded-full bg-white/15 px-4 py-1.5 text-[10px] font-semibold uppercase tracking-widest backdrop-blur sm:text-xs">
             <Sparkles className="h-3.5 w-3.5" />
-            {usesGatewayOffers
-              ? decisionDegraded
-                ? "NBX (resposta degradada)"
-                : "Ofertas do NBX Gateway"
-              : personalized
-                ? "Recomendado pelo NBX"
-                : "Campanha Vivo"}
+            {offersLoading
+              ? "Carregando ofertas…"
+              : usesGatewayOffers
+                ? decisionDegraded
+                  ? "NBX (resposta degradada)"
+                  : "Ofertas do NBX Gateway"
+                : personalized
+                  ? "Recomendado pelo NBX"
+                  : "Campanha Vivo"}
           </div>
           <h1 className="mt-5 max-w-2xl text-3xl font-extrabold leading-tight sm:text-4xl lg:text-6xl">
-            {usesGatewayOffers
-              ? "Pacote recomendado para o seu perfil"
-              : personalized
-                ? "Selecionamos as melhores ofertas pra você"
-                : "Tudo que você precisa, em um só lugar."}
+            {offersLoading
+              ? "Buscando as melhores opções para você"
+              : usesGatewayOffers
+                ? "Pacote recomendado para o seu perfil"
+                : personalized
+                  ? "Selecionamos as melhores ofertas pra você"
+                  : "Tudo que você precisa, em um só lugar."}
           </h1>
           <p className="mt-4 max-w-xl text-sm text-white/80 sm:text-base lg:text-lg">
-            {usesGatewayOffers
-              ? "Lista carregada da API de decisão (GET decision-access). Combine com interações para correlacionar na homologação."
-              : personalized
-                ? "Com base no seu interesse, nosso motor NBX recomendou esta combinação."
-                : "Descubra ofertas exclusivas em smartphones, internet e planos para toda a família."}
+            {offersLoading
+              ? "Aguarde enquanto carregamos os produtos do gateway NBX."
+              : usesGatewayOffers
+                ? "Lista carregada da API de decisão (GET decision-access). Combine com interações para correlacionar na homologação."
+                : personalized
+                  ? "Com base no seu interesse, nosso motor NBX recomendou esta combinação."
+                  : "Descubra ofertas exclusivas em smartphones, internet e planos para toda a família."}
           </p>
         </div>
       </section>
@@ -471,14 +543,22 @@ const Index = () => {
         <div className="mb-6 flex flex-wrap items-end justify-between gap-3 rounded-3xl bg-card/80 p-5 shadow-card-vivo backdrop-blur sm:p-6">
           <div className="min-w-0">
             <h2 className="text-xl font-bold text-foreground sm:text-2xl">
-              {usesGatewayOffers ? "Cards da decisão NBX" : personalized ? "Suas 4 ofertas NBX" : "Ofertas em destaque"}
+              {offersLoading
+                ? "Carregando ofertas"
+                : usesGatewayOffers
+                  ? "Cards da decisão NBX"
+                  : personalized
+                    ? "Suas 4 ofertas NBX"
+                    : "Ofertas em destaque"}
             </h2>
             <p className="text-xs text-muted-foreground sm:text-sm">
-              {usesGatewayOffers
-                ? "Ordenados por rank do motor; dados enriquecidos com o catálogo local quando os IDs coincidem."
-                : personalized
-                  ? "Personalizado em tempo real conforme você interage."
-                  : "Selecionado pelo time Vivo para você."}
+              {offersLoading
+                ? "Produtos vindos exclusivamente da API NBX."
+                : usesGatewayOffers
+                  ? "Ordenados por rank do motor; dados resolvidos via product-offerings quando disponível."
+                  : personalized
+                    ? "Personalizado em tempo real conforme você interage."
+                    : "Ofertas retornadas pelo gateway NBX."}
             </p>
           </div>
           {personalized && (
@@ -488,25 +568,69 @@ const Index = () => {
           )}
         </div>
 
-        <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
-          {primaryOffers.map((offer, idx) => (
-            <OfferCard
-              key={offer.id}
-              offer={offer}
-              recommended={personalized && idx === 0}
-              onClick={() => openOffer(offer.id)}
-            />
-          ))}
-        </div>
+        {offersLoading ? (
+          <>
+            <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div
+                  key={`sk-primary-${i}`}
+                  className="flex flex-col gap-3 rounded-3xl border border-border/50 bg-card p-4 shadow-sm"
+                >
+                  <Skeleton className="aspect-[4/3] w-full rounded-2xl" />
+                  <Skeleton className="h-4 w-3/4" />
+                  <Skeleton className="h-3 w-1/2" />
+                  <Skeleton className="h-8 w-1/3" />
+                </div>
+              ))}
+            </div>
 
-        <div className="mt-12">
-          <h3 className="mb-4 text-lg font-bold text-foreground">Explore mais</h3>
-          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
-            {exploreOffers.map((offer) => (
-              <OfferCard key={offer.id} offer={offer} onClick={() => openOffer(offer.id)} />
-            ))}
+            <div className="mt-12">
+              <h3 className="mb-4 text-lg font-bold text-foreground">Explore mais</h3>
+              <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <div
+                    key={`sk-explore-${i}`}
+                    className="flex flex-col gap-3 rounded-3xl border border-border/50 bg-card p-4 shadow-sm"
+                  >
+                    <Skeleton className="aspect-[4/3] w-full rounded-2xl" />
+                    <Skeleton className="h-4 w-2/3" />
+                    <Skeleton className="h-3 w-1/2" />
+                    <Skeleton className="h-8 w-1/4" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          </>
+        ) : primaryOffers.length === 0 ? (
+          <div className="rounded-3xl border border-dashed border-border bg-muted/30 px-6 py-16 text-center">
+            <p className="text-base font-semibold text-foreground">Nenhuma oferta disponível no momento</p>
+            <p className="mt-2 text-sm text-muted-foreground">
+              A API não retornou campanhas elegíveis para este cliente ou a resposta veio vazia.
+            </p>
           </div>
-        </div>
+        ) : (
+          <>
+            <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+              {primaryOffers.map((offer, idx) => (
+                <OfferCard
+                  key={offer.id}
+                  offer={offer}
+                  recommended={personalized && idx === 0}
+                  onClick={() => openOffer(offer.id)}
+                />
+              ))}
+            </div>
+
+            <div className="mt-12">
+              <h3 className="mb-4 text-lg font-bold text-foreground">Explore mais</h3>
+              <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+                {exploreOffers.map((offer) => (
+                  <OfferCard key={offer.id} offer={offer} onClick={() => openOffer(offer.id)} />
+                ))}
+              </div>
+            </div>
+          </>
+        )}
       </main>
 
       <footer className="border-t border-border/50 bg-background py-6">

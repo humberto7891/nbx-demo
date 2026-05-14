@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { CartItem, formatPrice, parsePrice } from "@/hooks/useCart";
-import { allOffers, Offer } from "@/data/offers";
+import type { Offer } from "@/data/offers";
 
 interface CartDrawerProps {
   open: boolean;
@@ -18,7 +18,7 @@ interface CartDrawerProps {
   onUpdateQuantity: (offerId: string, quantity: number) => void;
   onRemove: (offerId: string) => void;
   onCheckout: () => void;
-  /** Catálogo para resolver ítems (estático + ofertas do gateway). Padroniza com `mergedCatalog` da página. */
+  /** Catálogo NBX (API) para resolver itens — usar o mesmo mapa da página. */
   offersById?: Record<string, Offer>;
 }
 
@@ -29,7 +29,7 @@ export const CartDrawer = ({
   onUpdateQuantity,
   onRemove,
   onCheckout,
-  offersById = allOffers,
+  offersById = {},
 }: CartDrawerProps) => {
   const detailedItems = items
     .map((i) => ({ item: i, offer: offersById[i.offerId] }))
